@@ -1,0 +1,10 @@
+vllm>=0.12.0
+torch
+pandas
+transformers
+huggingface_hub
+tqdm
+datasets
+unsloth
+trl
+bitsandbytes
