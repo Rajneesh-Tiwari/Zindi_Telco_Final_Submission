@@ -146,6 +146,235 @@ def build_column_map(header_line, keyword_spec, strip_empty=False):
     return col_map if col_map else None
 
 
+# =============================================================================
+# GENERIC TABLE PARSER (fallback when specific parsers fail)
+# =============================================================================
+
+def _simplify_column_name(raw_name: str) -> Tuple[str, Optional[str]]:
+    """Strip common prefixes and extract units from a column header.
+
+    Returns (simplified_name, unit_string_or_None).
+    """
+    name = raw_name.strip()
+    # Extract units from brackets: [dBm], (km/h), (Mbps), (%), (dB), (0.5dB)
+    unit = None
+    unit_match = re.search(r'[\[\(]([^)\]]+)[\]\)]', name)
+    if unit_match:
+        unit = unit_match.group(1).strip()
+        name = name[:unit_match.start()].strip()
+
+    # Strip common telco prefixes
+    for prefix in [
+        '5G KPI PCell RF Serving ',
+        '5G KPI PCell RF ',
+        '5G KPI PCell Layer2 MAC DL ',
+        '5G KPI PCell Layer1 DL ',
+        '5G KPI PCell Layer1 ',
+        '5G KPI PCell ',
+    ]:
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+
+    # Convert to snake_case: replace non-alphanum with underscore, collapse
+    name = re.sub(r'[^a-zA-Z0-9]+', '_', name).strip('_').lower()
+    return name, unit
+
+
+def _find_table_regions(lines: List[str]) -> List[dict]:
+    """Find contiguous table regions in question text.
+
+    A table region is a run of lines where each line has >= 3 pipe characters.
+    Detects markdown style (leading/trailing pipes, separator rows with ---)
+    vs plain pipe-delimited style.
+
+    Returns list of dicts with keys: start, end, style, label.
+    """
+    regions = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if line.count('|') >= 3:
+            start = i
+            # Extend region while pipe-heavy lines continue
+            while i < n and lines[i].count('|') >= 3:
+                i += 1
+            end = i  # exclusive
+
+            # Detect style: markdown has leading/trailing pipes and --- separator
+            sample = lines[start]
+            is_markdown = (
+                sample.strip().startswith('|')
+                and sample.strip().endswith('|')
+            )
+
+            # Check for preceding section label
+            label = None
+            for j in range(start - 1, max(start - 4, -1), -1):
+                candidate = lines[j].strip()
+                if candidate and candidate.count('|') < 3:
+                    if candidate.endswith(':') or 'as follows' in candidate.lower():
+                        label = candidate.rstrip(':').strip()
+                    break
+
+            regions.append({
+                'start': start,
+                'end': end,
+                'style': 'markdown' if is_markdown else 'plain',
+                'label': label,
+            })
+        else:
+            i += 1
+    return regions
+
+
+def _parse_table_region(lines: List[str], region: dict) -> Optional[dict]:
+    """Parse a single table region into structured column data.
+
+    Returns dict with: label, headers, columns (dict of col_name -> [values]),
+    n_rows, or None if parsing fails.
+    """
+    table_lines = lines[region['start']:region['end']]
+    if len(table_lines) < 2:
+        return None
+
+    style = region['style']
+
+    if style == 'markdown':
+        split_fn = lambda line: [p.strip() for p in line.split('|') if p.strip()]
+    else:
+        split_fn = lambda line: [p.strip() for p in line.split('|')]
+
+    # First non-separator line is the header
+    header_idx = 0
+    headers = split_fn(table_lines[header_idx])
+    if not headers:
+        return None
+
+    # Find data rows (skip separator lines like |---|---|)
+    data_rows = []
+    for line in table_lines[header_idx + 1:]:
+        cells = split_fn(line)
+        # Skip separator rows
+        if all(re.match(r'^[-:]+$', c) for c in cells if c):
+            continue
+        if not cells:
+            continue
+        data_rows.append(cells)
+
+    if not data_rows:
+        return None
+
+    # Build column dict
+    columns = {}
+    for col_idx, raw_header in enumerate(headers):
+        col_name, unit = _simplify_column_name(raw_header)
+        if not col_name:
+            col_name = f'col_{col_idx}'
+        values = []
+        for row in data_rows:
+            if col_idx < len(row):
+                values.append(row[col_idx])
+            else:
+                values.append('')
+        columns[col_name] = {'values': values, 'unit': unit}
+
+    return {
+        'label': region.get('label'),
+        'headers': headers,
+        'columns': columns,
+        'n_rows': len(data_rows),
+    }
+
+
+def parse_tables_generic(
+    question: str,
+    max_unique_categorical: int = 10,
+    max_output_lines: int = 120,
+) -> Optional[str]:
+    """Parse all tables in a question into column-level summary stats.
+
+    Fallback parser for when specific Type A / Type B parsers fail
+    (e.g. renamed columns, different table layout). Produces output
+    in the same structured format the model was trained on:
+        field = value
+
+    Args:
+        question: Full question text.
+        max_unique_categorical: Cap on unique values shown for categorical columns.
+        max_output_lines: Maximum total output lines across all tables.
+
+    Returns:
+        Formatted summary string, or None if no parsable tables found.
+    """
+    all_lines = question.split('\n')
+    regions = _find_table_regions(all_lines)
+    if not regions:
+        return None
+
+    output_parts = []
+    total_lines = 0
+
+    for region in regions:
+        parsed = _parse_table_region(all_lines, region)
+        if parsed is None:
+            continue
+
+        label = parsed['label'] or 'Data'
+        n_rows = parsed['n_rows']
+        header = f"Table summary ({label}, {n_rows} rows):"
+        part_lines = [header]
+
+        for col_name, col_info in parsed['columns'].items():
+            if total_lines + len(part_lines) >= max_output_lines:
+                break
+
+            raw_values = col_info['values']
+            unit = col_info['unit']
+            unit_str = f' {unit}' if unit else ''
+
+            # Try to classify as numeric
+            numeric_vals = []
+            for v in raw_values:
+                v_stripped = v.strip()
+                if not v_stripped or v_stripped == '-' or v_stripped.lower() == 'nan':
+                    continue
+                try:
+                    numeric_vals.append(float(v_stripped))
+                except (ValueError, TypeError):
+                    pass
+
+            # Column is numeric if >= 50% of non-empty values parse as float
+            non_empty = [v.strip() for v in raw_values if v.strip() and v.strip() != '-']
+            if non_empty and len(numeric_vals) / len(non_empty) >= 0.5:
+                if numeric_vals:
+                    mn = min(numeric_vals)
+                    mx = max(numeric_vals)
+                    mean = sum(numeric_vals) / len(numeric_vals)
+                    part_lines.append(
+                        f'  {col_name}: min={mn:.2f}, max={mx:.2f}, mean={mean:.2f}{unit_str}'
+                    )
+            else:
+                # Categorical
+                unique = sorted(set(v.strip() for v in raw_values if v.strip()))
+                if len(unique) <= max_unique_categorical:
+                    part_lines.append(f'  {col_name}: unique={unique}')
+                else:
+                    part_lines.append(
+                        f'  {col_name}: {len(unique)} unique values'
+                    )
+
+        if len(part_lines) > 1:  # more than just the header
+            output_parts.append('\n'.join(part_lines))
+            total_lines += len(part_lines) + 1  # +1 for blank line between tables
+
+    if not output_parts:
+        return None
+
+    return '\n\n'.join(output_parts)
+
+
 # --- Column keyword specs (constants) ---
 # Keywords are matched case-insensitively as substrings of column headers.
 # They must be specific enough to uniquely identify each column even when

@@ -46,6 +46,7 @@ from telco_utils import (
     parse_type_a_question,
     extract_type_a_options,
     classify_question_type,
+    parse_tables_generic,
 )
 from generate_traces_final import (
     compute_all_metrics, format_metrics_block,
@@ -193,10 +194,37 @@ def get_question_type(question: str) -> str:
 
     # Fallback heuristics for unexpected formats
     q_lower = question.lower()
-    if 'potential root causes' in q_lower and '|' in question:
+    # Type A mentions N root causes (5/6/7/8) and uses 600Mbps threshold
+    if 'potential root causes' in q_lower and '|' in question and '600' in question:
         return 'type_a'
-    if 'throughput drop' in q_lower and 'drive test' in q_lower:
+    # Type B uses 100Mbps threshold - the key discriminator vs Type A
+    if 'throughput drop' in q_lower and '100mbps' in q_lower.replace(' ', ''):
         return 'type_b'
+
+    # Content-based fallback for differently-worded questions
+    has_tables = question.count('|') >= 6
+
+    if has_tables:
+        telco_option_keywords = [
+            'downtilt', 'overshooting', 'over-shooting', 'handover',
+            'pci mod 30', 'pci collision', 'scheduled rbs', 'overlapping coverage',
+            'neighboring cell', 'weak coverage', 'interference',
+        ]
+        telco_column_keywords = [
+            'rsrp', 'sinr', 'pci', 'throughput', 'gnodeb', 'bler',
+            'handover', 'arfcn',
+        ]
+
+        option_hits = sum(1 for kw in telco_option_keywords if kw in q_lower)
+        column_hits = sum(1 for kw in telco_column_keywords if kw in q_lower)
+
+        if option_hits >= 2 or column_hits >= 3:
+            # Distinguish Type A vs Type B by table style
+            # Type B uses markdown tables (leading/trailing pipes, separator rows with ---)
+            if re.search(r'^\s*\|.*\|.*\|\s*$', question, re.MULTILINE) and '---' in question:
+                return 'type_b'
+            else:
+                return 'type_a'
 
     return 'generic'
 
@@ -263,6 +291,13 @@ def format_prompt(question: str, tokenizer=None) -> str:
     else:
         system_prompt = GENERIC_SYSTEM_PROMPT
         metrics_block = None
+
+    # Fallback: if specific parser failed but tables exist, use generic parser
+    if metrics_block is None and question.count('|') >= 6:
+        generic_summary = parse_tables_generic(question)
+        if generic_summary:
+            metrics_block = generic_summary
+            logger.warning(f"Using generic table fallback for {q_type} question")
 
     # Build user message matching SFT training format
     if metrics_block:
