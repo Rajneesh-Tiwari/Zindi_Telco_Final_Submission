@@ -16,6 +16,8 @@ submission/                 # Pre-generated submission
 ```
 
 **Inference on a new test CSV:**
+
+*Option 1: Clone from HuggingFace (recommended)*
 ```bash
 # Clone the repo (includes model weights + inference scripts)
 git lfs install
@@ -31,9 +33,20 @@ python inference_grpo_final.py \
     --test-csv /path/to/test.csv \
     --output-dir ./outputs
 ```
+
+*Option 2: Use HF hosted model (downloads weights on first run)*
+```bash
+pip install vllm>=0.13.0,<0.14.0 torch pandas transformers huggingface_hub tqdm
+
+python inference_grpo_final.py \
+    --model Phaedrus33/GRPO_final_submission \
+    --test-csv /path/to/test.csv \
+    --output-dir ./outputs
+```
+
 The test CSV requires two columns: `ID` (unique question identifier) and `question` (full question text including data tables). Output submission is written to `./outputs/submission_plurality.csv`.
 
-**Requirements:** GPU with 80GB+ VRAM (A100-80GB, H100) or 2x 40GB GPUs with `--num-gpus 2`. Python 3.10+, CUDA 12.x.
+**Requirements:** 1x GPU with 80GB+ VRAM (A100-80GB, H100). Python 3.10+, CUDA 12.x.
 
 **Options:**
 - Reduce compute: `--num-generations 1` for single prediction per ID (no voting)
