@@ -10,20 +10,34 @@ train_grpo_final.py         # GRPO reinforcement learning (3 reward functions)
 inference_grpo_final.py     # vLLM inference with majority/plurality voting
 run_final.sh                # End-to-end pipeline orchestration
 requirements.txt            # Python dependencies
-REPORT_final.md             # Detailed solution report
+report.pdf                  # Detailed solution report
 submission/                 # Pre-generated submission
   Final_submission_plurality_pp.csv   # Phase 2 submission (score: 0.9582)
 ```
 
-**Quick start:** `bash run_final.sh --all` (requires `HF_TOKEN` environment variable and GPU).
-
 **Inference on a new test CSV:**
 ```bash
+# Clone the repo (includes model weights + inference scripts)
+git lfs install
+git clone https://huggingface.co/Phaedrus33/GRPO_final_submission
+cd GRPO_final_submission
+
+# Install dependencies
 pip install -r requirements.txt
-export HF_TOKEN=your_token
-bash run_final.sh --infer --test-csv path/to/new_test.csv
+
+# Run inference (model is local, no download needed)
+python inference_grpo_final.py \
+    --model . \
+    --test-csv /path/to/test.csv \
+    --output-dir ./outputs
 ```
-The test CSV requires two columns: `ID` (unique question identifier) and `question` (full question text including data tables). Output submission CSVs are written to `outputs/inference/`.
+The test CSV requires two columns: `ID` (unique question identifier) and `question` (full question text including data tables). Output submission is written to `./outputs/submission_plurality.csv`.
+
+**Requirements:** GPU with 80GB+ VRAM (A100-80GB, H100) or 2x 40GB GPUs with `--num-gpus 2`. Python 3.10+, CUDA 12.x.
+
+**Options:**
+- Reduce compute: `--num-generations 1` for single prediction per ID (no voting)
+- Out-of-memory: `--batch-size 8` (or lower)
 
 **Pre-generated submission:** `submission/Final_submission_plurality_pp.csv` scores **0.9582** on the Phase 2 test dataset.
 
@@ -138,4 +152,4 @@ The training pipeline is fully reproducible: `run_final.sh --all` regenerates tr
 - **GRPO**: 1x NVIDIA H200 NVL 141GB, vLLM 0.12.0 for generation
 - **Inference**: 1x NVIDIA H200 NVL 141GB, vLLM 0.12.0, bfloat16, CUDA graphs enabled, batch size 32
 
-Full pipeline: `bash run_final.sh --all` (requires HF_TOKEN environment variable).
+Full training pipeline (trace generation + SFT + GRPO): `bash run_final.sh --all` (requires HF_TOKEN environment variable and 80GB+ GPU).
